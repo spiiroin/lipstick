@@ -1,6 +1,6 @@
 /***************************************************************************
 **
-** Copyright (C) 2013, 2014 Jolla Ltd.
+** Copyright (C) 2013, 2014, 2015 Jolla Ltd.
 ** Contact: Jonni Rainisto <jonni.rainisto@jollamobile.com>
 **
 ** This file is part of lipstick.
@@ -26,11 +26,17 @@
 #include <QDBusMessage>
 #include <QDBusConnectionInterface>
 #include "homeapplication.h"
+#include <mce/dbus-names.h>
+#include <mce/mode-names.h>
+
+/** Maximum extra delay when waking up from suspend to apply devicelock */
+#define DEVICELOCK_MAX_WAKEUP_DELAY_S 12
 
 namespace {
 const char * const settingsFile = "/usr/share/lipstick/devicelock/devicelock_settings.conf";
 const char * const lockingKey = "/desktop/nemo/devicelock/automatic_locking";
 }
+
 DeviceLock::DeviceLock(QObject * parent) :
     QObject(parent),
     QDBusContext(),
@@ -55,10 +61,12 @@ DeviceLock::DeviceLock(QObject * parent) :
     trackBlankingInhibit();
 }
 
-// Call State
+/** Handle call state signal/reply from mce
+ */
 void DeviceLock::handleCallStateChanged(const QString &state)
 {
-    bool active = (state == "active" || state == "ringing");
+    bool active = (state == MCE_CALL_STATE_ACTIVE ||
+                   state == MCE_CALL_STATE_RINGING);
 
     if (m_activeCall != active) {
         qDebug() << state;
@@ -80,20 +88,21 @@ void DeviceLock::handleCallStateReply(QDBusPendingCallWatcher *call)
 
 void DeviceLock::trackCallState()
 {
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "sig_call_state_ind",
+    QDBusConnection::systemBus().connect(QString(), MCE_SIGNAL_PATH, MCE_SIGNAL_IF, MCE_CALL_STATE_SIG,
                                          this, SLOT(handleCallStateChanged(QString)));
 
-    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_call_state");
+    QDBusMessage call = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_CALL_STATE_GET);
     QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
     QDBusPendingCallWatcher *watch = new QDBusPendingCallWatcher(reply, this);
     connect(watch, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleCallStateReply(QDBusPendingCallWatcher*)));
 }
 
-// Display State
-
+/** Handle display state signal/reply from mce
+ */
 void DeviceLock::handleDisplayStateChanged(const QString &state)
 {
-    bool displayOn = (state == "on" || state == "dimmed");
+    bool displayOn = (state == MCE_DISPLAY_ON_STRING ||
+                      state == MCE_DISPLAY_DIM_STRING);
 
     if (m_displayOn != displayOn) {
         qDebug() << state;
@@ -115,17 +124,17 @@ void DeviceLock::handleDisplayStateReply(QDBusPendingCallWatcher *call)
 
 void DeviceLock::trackDisplayState()
 {
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_status_ind",
+    QDBusConnection::systemBus().connect(QString(), MCE_SIGNAL_PATH, MCE_SIGNAL_IF, MCE_DISPLAY_SIG,
                                          this, SLOT(handleDisplayStateChanged(QString)));
 
-    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_status");
+    QDBusMessage call = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_DISPLAY_STATUS_GET);
     QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
     QDBusPendingCallWatcher *watch = new QDBusPendingCallWatcher(reply, this);
     connect(watch, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleDisplayStateReply(QDBusPendingCallWatcher*)));
 }
 
-// Inactivity State
-
+/** Handle inactivity state signal/reply from mce
+ */
 void DeviceLock::handleInactivityStateChanged(const bool state)
 {
     bool activity = !state;
@@ -150,20 +159,20 @@ void DeviceLock::handleInactivityStateReply(QDBusPendingCallWatcher *call)
 
 void DeviceLock::trackInactivityState(void)
 {
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "system_inactivity_ind",
+    QDBusConnection::systemBus().connect(QString(), MCE_SIGNAL_PATH, MCE_SIGNAL_IF, MCE_INACTIVITY_SIG,
                                          this, SLOT(handleInactivityStateChanged(bool)));
 
-    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_inactivity_status");
+    QDBusMessage call = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_INACTIVITY_STATUS_GET);
     QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
     QDBusPendingCallWatcher *watch = new QDBusPendingCallWatcher(reply, this);
     connect(watch, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleInactivityStateReply(QDBusPendingCallWatcher*)));
 }
 
-// Blanking Inhibit
-
+/** Handle blanking inhibit state signal/reply from mce
+ */
 void DeviceLock::handleBlankingInhibitChanged(const QString &state)
 {
-    bool blankingInhibit = (state == "active");
+    bool blankingInhibit = (state == MCE_INHIBIT_BLANK_ACTIVE_STRING);
     if (m_blankingInhibit != blankingInhibit ) {
         qDebug() << state;
         m_blankingInhibit = blankingInhibit;
@@ -184,19 +193,20 @@ void DeviceLock::handleBlankingInhibitReply(QDBusPendingCallWatcher *call)
 
 void DeviceLock::trackBlankingInhibit()
 {
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_inhibit_ind", this, SLOT(handleBlankingInhibitChanged(QString)));
+    QDBusConnection::systemBus().connect(QString(), MCE_SIGNAL_PATH, MCE_SIGNAL_IF, MCE_BLANKING_INHIBIT_SIG,
+                                         this, SLOT(handleBlankingInhibitChanged(QString)));
 
-    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_inhibit");
+    QDBusMessage call = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_BLANKING_INHIBIT_GET);
     QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
     QDBusPendingCallWatcher *inhibitWatcher = new QDBusPendingCallWatcher(reply, this);
     connect(inhibitWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingInhibitReply(QDBusPendingCallWatcher*)));
 }
 
-// Blanking Pause
-
+/** Handle blanking pause state signal/reply from mce
+ */
 void DeviceLock::handleBlankingPauseChanged(const QString &state)
 {
-    bool blankingPause = (state == "active");
+    bool blankingPause = (state == MCE_PREVENT_BLANK_ACTIVE_STRING);
     if (m_blankingPause != blankingPause ) {
         qDebug() << state;
         m_blankingPause = blankingPause;
@@ -218,9 +228,10 @@ void DeviceLock::handleBlankingPauseReply(QDBusPendingCallWatcher *call)
 void DeviceLock::trackBlankingPause()
 {
     // track blanking pause state
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_pause_ind", this, SLOT(handleBlankingPauseChanged(QString)));
+    QDBusConnection::systemBus().connect(QString(), MCE_SIGNAL_PATH, MCE_SIGNAL_IF, MCE_PREVENT_BLANK_SIG,
+                                         this, SLOT(handleBlankingPauseChanged(QString)));
 
-    QDBusMessage pauseCall = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_pause");
+    QDBusMessage pauseCall = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_PREVENT_BLANK_GET);
     QDBusPendingCall pauseReply = QDBusConnection::systemBus().asyncCall(pauseCall);
     QDBusPendingCallWatcher *pauseWatcher = new QDBusPendingCallWatcher(pauseReply, this);
     connect(pauseWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingPauseReply(QDBusPendingCallWatcher*)));
@@ -238,6 +249,8 @@ void DeviceLock::init()
     setState((lockingDelay<0) ? Unlocked : Locked);
 }
 
+/** Dummy function to statisfy unit test code ...
+ */
 void DeviceLock::setupLockTimer()
 {
     // FIXME: unit test code wants to have both setupLockTimer() and
@@ -254,7 +267,7 @@ DeviceLock::LockState DeviceLock::getImplicitLockState()
     LockState requiredState = deviceLockState;
 
     if (deviceLockState == Undefined) {
-        /* Initial state is decided by init() */
+        /* Initial state must be decided by init() */
     }
     else if (lockingDelay < 0) {
         /* Device locking is disabled */
@@ -291,6 +304,8 @@ bool DeviceLock::lockingAllowed()
     return true;
 }
 
+/** Evaluate required devicelock state and/or need for timer
+ */
 void DeviceLock::setStateAndSetupLockTimer()
 {
     LockState requiredState = getImplicitLockState();
@@ -306,9 +321,10 @@ void DeviceLock::setStateAndSetupLockTimer()
         /* Start devicelock timer
          */
         if (!m_hbTimer->isWaiting()) {
-            int delay_s = lockingDelay * 60;
-            qDebug("start devicelock timer (%d s)", delay_s);
-            m_hbTimer->wait(delay_s, delay_s + 12);
+            int range_lo = lockingDelay * 60;
+            int range_hi = range_lo + DEVICELOCK_MAX_WAKEUP_DELAY_S;
+            qDebug("start devicelock timer (%d-%d s)", range_lo, range_hi);
+            m_hbTimer->wait(range_lo, range_hi);
         }
         else {
             qDebug("devicelock timer already running");
@@ -324,6 +340,8 @@ void DeviceLock::setStateAndSetupLockTimer()
     }
 }
 
+/** Slot for locking device
+ */
 void DeviceLock::lock()
 {
     qDebug() << "devicelock triggered";
@@ -345,6 +363,8 @@ bool DeviceLock::blankingInhibit() const
     return m_blankingInhibit;
 }
 
+/** Helper for producing human readable devicelock state logging
+ */
 static const char *reprLockState(int state)
 {
     switch (state) {
@@ -356,6 +376,8 @@ static const char *reprLockState(int state)
     return "Invalid";
 }
 
+/** Explicitly set devicelock state
+ */
 void DeviceLock::setState(int state)
 {
     if (deviceLockState != (LockState)state) {
@@ -369,7 +391,8 @@ void DeviceLock::setState(int state)
 
             setStateAndSetupLockTimer();
         } else {
-            sendErrorReply(QDBusError::AccessDenied, QString("Caller is not in privileged group"));
+            sendErrorReply(QDBusError::AccessDenied,
+                           QString("Caller is not in privileged group"));
         }
     }
 }
