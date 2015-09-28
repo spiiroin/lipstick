@@ -3,7 +3,6 @@ SUBDIRS = \
           ut_batterynotifier \
           ut_categorydefinitionstore \
           ut_closeeventeater \
-          ut_devicelock \
           ut_diskspacenotifier \
           ut_launchermodel \
           ut_lipsticksettings \
@@ -19,6 +18,9 @@ SUBDIRS = \
           ut_thermalnotifier \
           ut_usbmodeselector \
           ut_volumecontrol \
+
+#         ut_devicelock \
+
 
 support_files.commands += $$PWD/gen-tests-xml.sh > $$OUT_PWD/tests.xml
 support_files.target = support_files
