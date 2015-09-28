@@ -97,9 +97,9 @@ private:
     LockState getRequiredLockState();
     bool lockingAllowed();
 
-    int lockingDelay;
-    QFileSystemWatcher watcher;
-    LockState deviceLockState;
+    int m_lockingDelay;
+    QFileSystemWatcher m_settingsWatcher;
+    LockState m_deviceLockState;
     BackgroundActivity *m_hbTimer;
     bool m_userActivity;
     bool m_displayOn;

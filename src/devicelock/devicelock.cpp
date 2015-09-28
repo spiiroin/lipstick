@@ -40,8 +40,8 @@ const char * const lockingKey = "/desktop/nemo/devicelock/automatic_locking";
 DeviceLock::DeviceLock(QObject * parent) :
     QObject(parent),
     QDBusContext(),
-    lockingDelay(-1),
-    deviceLockState(Undefined),
+    m_lockingDelay(-1),
+    m_deviceLockState(Undefined),
     m_userActivity(true),
     m_displayOn(true),
     m_callActive(false),
@@ -241,12 +241,12 @@ void DeviceLock::trackBlankingPause()
  */
 void DeviceLock::init()
 {
-    if (QFile(settingsFile).exists() && watcher.addPath(settingsFile)) {
-        connect(&watcher, SIGNAL(fileChanged(QString)), this, SLOT(readSettings()));
+    if (QFile(settingsFile).exists() && m_settingsWatcher.addPath(settingsFile)) {
+        connect(&m_settingsWatcher, SIGNAL(fileChanged(QString)), this, SLOT(readSettings()));
         readSettings();
     }
 
-    setState((lockingDelay<0) ? Unlocked : Locked);
+    setState((m_lockingDelay<0) ? Unlocked : Locked);
 }
 
 /** Evaluate devicelock state we should be in
@@ -254,16 +254,16 @@ void DeviceLock::init()
 DeviceLock::LockState DeviceLock::getRequiredLockState()
 {
     /* Assume current state is ok */
-    LockState requiredState = deviceLockState;
+    LockState requiredState = m_deviceLockState;
 
-    if (deviceLockState == Undefined) {
+    if (m_deviceLockState == Undefined) {
         /* Initial state must be decided by init() */
     }
-    else if (lockingDelay < 0) {
+    else if (m_lockingDelay < 0) {
         /* Device locking is disabled */
         requiredState = Unlocked;
     }
-    else if (lockingDelay == 0 && !m_displayOn) {
+    else if (m_lockingDelay == 0 && !m_displayOn) {
         /* Display is off in immediate lock mode */
         requiredState = Locked;
     }
@@ -276,11 +276,11 @@ DeviceLock::LockState DeviceLock::getRequiredLockState()
 bool DeviceLock::lockingAllowed()
 {
     /* Must be currently unlocked */
-    if (deviceLockState != Unlocked)
+    if (m_deviceLockState != Unlocked)
         return false;
 
     /* Must not be disabled */
-    if (lockingDelay < 0)
+    if (m_lockingDelay < 0)
         return false;
 
     /* Must not be in active use */
@@ -300,7 +300,7 @@ void DeviceLock::setStateAndSetupLockTimer()
 {
     LockState requiredState = getRequiredLockState();
 
-    if (deviceLockState != requiredState) {
+    if (m_deviceLockState != requiredState) {
         /* We should be in different deviceLockState. Set the state
          * and assume that setState() recurses back here so that we
          * get another chance to deal with the stable state.
@@ -311,7 +311,7 @@ void DeviceLock::setStateAndSetupLockTimer()
         /* Start devicelock timer
          */
         if (!m_hbTimer->isWaiting()) {
-            int range_lo = lockingDelay * 60;
+            int range_lo = m_lockingDelay * 60;
             int range_hi = range_lo + DEVICELOCK_MAX_WAKEUP_DELAY_S;
             qDebug("start devicelock timer (%d-%d s)", range_lo, range_hi);
             m_hbTimer->wait(range_lo, range_hi);
@@ -340,7 +340,7 @@ void DeviceLock::lock()
 
 int DeviceLock::state() const
 {
-    return deviceLockState;
+    return m_deviceLockState;
 }
 
 bool  DeviceLock::blankingPause() const
@@ -370,12 +370,12 @@ static const char *reprLockState(int state)
  */
 void DeviceLock::setState(int state)
 {
-    if (deviceLockState != (LockState)state) {
+    if (m_deviceLockState != (LockState)state) {
         if (state == Locked || isPrivileged()) {
-            qDebug() << reprLockState(deviceLockState) <<
+            qDebug() << reprLockState(m_deviceLockState) <<
                 " -> " << reprLockState(state);
 
-            deviceLockState = (LockState)state;
+            m_deviceLockState = (LockState)state;
             emit stateChanged(state);
             emit _notifyStateChanged();
 
@@ -430,9 +430,9 @@ void DeviceLock::readSettings()
 {
     QSettings settings(settingsFile, QSettings::IniFormat);
     if (isSet())
-        lockingDelay = settings.value(lockingKey, "-1").toInt();
+        m_lockingDelay = settings.value(lockingKey, "-1").toInt();
     else
-        lockingDelay = -1;
+        m_lockingDelay = -1;
     setStateAndSetupLockTimer();
 }
 
