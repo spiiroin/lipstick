@@ -67,29 +67,47 @@ DeviceLock::DeviceLock(QObject * parent) :
     m_blankingPause(false),
     m_blankingInhibit(false)
 {
+    // flag timer as not-started
     monoTime.tv_sec = 0;
-    connect(lockTimer, SIGNAL(timeout()), this, SLOT(lock()));
-    connect(qmActivity, SIGNAL(activityChanged(MeeGo::QmActivity::Activity)), this, SLOT(handleActivityChanged(MeeGo::QmActivity::Activity)));
-    connect(qmLocks, SIGNAL(stateChanged(MeeGo::QmLocks::Lock,MeeGo::QmLocks::State)), this, SLOT(setStateAndSetupLockTimer()));
-    connect(qmDisplayState, SIGNAL(displayStateChanged(MeeGo::QmDisplayState::DisplayState)), this, SLOT(handleDisplayStateChanged(MeeGo::QmDisplayState::DisplayState)));
+
+    // deviceLockState stays Undefined until init() gets called
     connect(static_cast<HomeApplication *>(qApp), &HomeApplication::homeReady, this, &DeviceLock::init);
 
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "sig_call_state_ind", this, SLOT(handleCallStateChange(QString, QString)));
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_pause_ind", this, SLOT(handleBlankingPauseChange(QString)));
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_inhibit_ind", this, SLOT(handleBlankingInhibitChange(QString)));
+    // locking happens via QTimer that can trigger too late
+    connect(lockTimer, SIGNAL(timeout()), this, SLOT(lock()));
 
+    // track inactivity state
+    connect(qmActivity, SIGNAL(activityChanged(MeeGo::QmActivity::Activity)), this, SLOT(handleActivityChanged(MeeGo::QmActivity::Activity)));
+    // FIXME: sync D-Bus query
+    handleActivityChanged(qmActivity->get());
+
+    // track tklock state
+    connect(qmLocks, SIGNAL(stateChanged(MeeGo::QmLocks::Lock,MeeGo::QmLocks::State)), this, SLOT(setStateAndSetupLockTimer()));
+    // FIXME: this is most likely useless (but might inadvertly fix the missing display state init?)
+
+    // track display state
+    connect(qmDisplayState, SIGNAL(displayStateChanged(MeeGo::QmDisplayState::DisplayState)), this, SLOT(handleDisplayStateChanged(MeeGo::QmDisplayState::DisplayState)));
+    // FIXME: sync D-Bus query
+    handleDisplayStateChanged(qmDisplayState->get());
+
+    // track call state
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "sig_call_state_ind", this, SLOT(handleCallStateChange(QString, QString)));
+    // FIXME: missing query for: initial call state -> problems on lipstick crash & restart
+
+    // track blanking inhibit state
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_inhibit_ind", this, SLOT(handleBlankingInhibitChange(QString)));
     QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_inhibit");
     QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
-    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(reply, this);
-    connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(sendInhibitFinished(QDBusPendingCallWatcher*)));
+    QDBusPendingCallWatcher *inhibitWatcher = new QDBusPendingCallWatcher(reply, this);
+    connect(inhibitWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(sendInhibitFinished(QDBusPendingCallWatcher*)));
 
+    // track blanking pause state
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_pause_ind", this, SLOT(handleBlankingPauseChange(QString)));
     QDBusMessage pauseCall = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_pause");
     QDBusPendingCall pauseReply = QDBusConnection::systemBus().asyncCall(pauseCall);
     QDBusPendingCallWatcher *pauseWatcher = new QDBusPendingCallWatcher(pauseReply, this);
     connect(pauseWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(sendPauseFinished(QDBusPendingCallWatcher*)));
 
-    handleActivityChanged(qmActivity->get());
-    handleDisplayStateChanged(qmDisplayState->get());
 }
 
 void DeviceLock::sendInhibitFinished(QDBusPendingCallWatcher *call)
@@ -118,10 +136,12 @@ void DeviceLock::sendPauseFinished(QDBusPendingCallWatcher *call)
 void DeviceLock::handleCallStateChange(const QString &state, const QString &ignored)
 {
     Q_UNUSED(ignored);
-    if (state.contains("active")) {
-        isCallActive = true;
-    } else {
-        isCallActive = false;
+
+    bool active = (state == "active" || state == "ringing");
+
+    if (isCallActive != active) {
+        isCallActive = active;
+        setStateAndSetupLockTimer();
     }
 }
 
@@ -153,61 +173,97 @@ void DeviceLock::handleActivityChanged(MeeGo::QmActivity::Activity activity)
 void DeviceLock::init()
 {
     if (QFile(settingsFile).exists() && watcher.addPath(settingsFile)) {
-        readSettings();
         connect(&watcher, SIGNAL(fileChanged(QString)), this, SLOT(readSettings()));
+        readSettings();
     }
 
-    setState(isSet() && lockingDelay >= 0 ? Locked : Unlocked);
+    setState((lockingDelay<0) ? Unlocked : Locked);
 }
 
 void DeviceLock::setupLockTimer()
 {
-    if (deviceLockState == Locked) {
-        // Device already locked: stop the timer
-        lockTimer->stop();
-        monoTime.tv_sec = 0;
-    } else {
-        if (lockingDelay <= 0 || (m_activity == MeeGo::QmActivity::Active && m_displayState != MeeGo::QmDisplayState::DisplayState::Off)) {
-            // Locking disabled or device active: stop the timer
-            lockTimer->stop();
-            monoTime.tv_sec = 0;
-        } else if (!isCallActive && !monoTime.tv_sec && m_activity == MeeGo::QmActivity::Inactive) {
-            // Locking in N minutes enabled and device inactive: start the timer
-            lockTimer->start(lockingDelay * 60 * 1000);
-            tv_get_monotime(&monoTime);
-        }
-    }
+    // FIXME: unit test code wants to have both setupLockTimer() and
+    //        setStateAndSetupLockTimer() defined and I do not want
+    //        to meddle with the unit test logic
+    setStateAndSetupLockTimer();
 }
 
 void DeviceLock::setStateAndSetupLockTimer()
 {
-    if (lockingDelay < 0 && deviceLockState != Undefined) {
-        // Locking disabled: unlock
-        setState(Unlocked);
+    LockState requireState = deviceLockState;
+
+    bool disabled = (lockingDelay < 0);
+    bool immediate = (lockingDelay == 0);
+    bool displayOn = (m_displayState != MeeGo::QmDisplayState::DisplayState::Off);
+    bool triggered = false;
+
+    if (monoTime.tv_sec) {
+        /* Timer was started, check if it should have already triggered */
+        struct timeval compareTime;
+        tv_get_monotime(&compareTime);
+        if (lockingDelay*60 < tv_diff_in_s(&compareTime, &monoTime))
+            triggered = true;
+
     }
-    setupLockTimer();
+
+    /* Check in what deviceLockState we ought to be in
+     */
+    if (deviceLockState == Undefined) {
+        // Device lock state is not yet set
+        // -> need to wait for init() to finish
+    }
+    else if (disabled) {
+        // Device locking is disabled
+        requireState = Unlocked;
+    }
+    else if (triggered) {
+        // Timer should have already triggered
+        requireState = Locked;
+    }
+    else if (immediate && !displayOn) {
+        // Display is off in immediate lock mode
+        requireState = Locked;
+    }
+
+    if (deviceLockState != requireState) {
+        /* We should be in different deviceLockState. Set the
+         * state and assume that setState() recurses back here
+         * and we get to deal with the stable state
+         */
+        setState(requireState);
+    }
+    else {
+        /* Start/stop device lock timer as needed
+         */
+
+        bool activity = (m_activity == MeeGo::QmActivity::Active);
+        bool locked = (deviceLockState == Locked);
+
+        if( disabled || locked || isCallActive || (activity && displayOn)) {
+            if( monoTime.tv_sec ) {
+                qDebug() << "stop device lock timer";
+                lockTimer->stop();
+                monoTime.tv_sec = 0;
+            }
+        }
+        else {
+            if( !monoTime.tv_sec ) {
+                qDebug() << "start device lock timer";
+                lockTimer->start(lockingDelay * 60 * 1000);
+                tv_get_monotime(&monoTime);
+            }
+            else {
+                qDebug() << "device lock timer already running";
+            }
+        }
+    }
 }
 
 void DeviceLock::handleDisplayStateChanged(MeeGo::QmDisplayState::DisplayState state)
 {
-    if (state == m_displayState)
-        return;
-
-    m_displayState = state;
-
-    if (lockingDelay == 0 && state == MeeGo::QmDisplayState::DisplayState::Off
-            && !isCallActive) {
-        // Immediate locking enabled and the display is off and not in call: lock
-        setState(Locked);
-    } else if (state == MeeGo::QmDisplayState::DisplayState::Off) {
+    if (m_displayState != state) {
+        m_displayState = state;
         setStateAndSetupLockTimer();
-    } else if (monoTime.tv_sec && lockingDelay > 0) {
-        struct timeval compareTime;
-        tv_get_monotime(&compareTime);
-        if (lockingDelay*60 < tv_diff_in_s(&compareTime, &monoTime)) {
-            setState(Locked);
-        }
-        setupLockTimer();
     }
 }
 
@@ -239,7 +295,7 @@ void DeviceLock::setState(int state)
             emit stateChanged(state);
             emit _notifyStateChanged();
 
-            setupLockTimer();
+            setStateAndSetupLockTimer();
         } else {
             sendErrorReply(QDBusError::AccessDenied, QString("Caller is not in privileged group"));
         }
@@ -288,10 +344,11 @@ bool DeviceLock::runPlugin(const QStringList &args)
 void DeviceLock::readSettings()
 {
     QSettings settings(settingsFile, QSettings::IniFormat);
-    lockingDelay = settings.value(lockingKey, "-1").toInt();
-    if (deviceLockState != Undefined) {
-        setStateAndSetupLockTimer();
-    }
+    if( isSet() )
+        lockingDelay = settings.value(lockingKey, "-1").toInt();
+    else
+        lockingDelay = -1;
+    setStateAndSetupLockTimer();
 }
 
 bool DeviceLock::isPrivileged()
