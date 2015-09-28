@@ -249,16 +249,6 @@ void DeviceLock::init()
     setState((lockingDelay<0) ? Unlocked : Locked);
 }
 
-/** Dummy function to statisfy unit test code ...
- */
-void DeviceLock::setupLockTimer()
-{
-    // FIXME: unit test code wants to have both setupLockTimer() and
-    //        setStateAndSetupLockTimer() defined and I do not have
-    //        a clue how the unit test logic works ...
-    setStateAndSetupLockTimer();
-}
-
 /** Evaluate devicelock state we should be in
  */
 DeviceLock::LockState DeviceLock::getImplicitLockState()
