@@ -31,32 +31,10 @@ namespace {
 const char * const settingsFile = "/usr/share/lipstick/devicelock/devicelock_settings.conf";
 const char * const lockingKey = "/desktop/nemo/devicelock/automatic_locking";
 }
-/* ------------------------------------------------------------------------- *
- * struct timeval helpers
- * ------------------------------------------------------------------------- */
-static void tv_get_monotime(struct timeval *tv)
-{
-#if defined(CLOCK_BOOTTIME)
-  struct timespec ts;
-  if (clock_gettime(CLOCK_BOOTTIME, &ts) < 0)
-      if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
-          qFatal("Can't clock_gettime!");
-  TIMESPEC_TO_TIMEVAL(tv, &ts);
-#endif
-}
-
-static int tv_diff_in_s(const struct timeval *tv1, const struct timeval *tv2)
-{
-    struct timeval tv;
-    timersub(tv1, tv2, &tv);
-    return tv.tv_sec;
-}
-
 DeviceLock::DeviceLock(QObject * parent) :
     QObject(parent),
     QDBusContext(),
     lockingDelay(-1),
-    lockTimer(new QTimer(this)),
     deviceLockState(Undefined),
     m_activity(true),
     m_displayOn(true),
@@ -64,13 +42,11 @@ DeviceLock::DeviceLock(QObject * parent) :
     m_blankingPause(false),
     m_blankingInhibit(false)
 {
-    // flag timer as not-started
-    monoTime.tv_sec = 0;
-
     // Note: deviceLockState stays Undefined until init() gets called
     connect(static_cast<HomeApplication *>(qApp), &HomeApplication::homeReady, this, &DeviceLock::init);
 
-    connect(lockTimer, SIGNAL(timeout()), this, SLOT(lock()));
+    m_hbTimer = new BackgroundActivity(this);
+    connect(m_hbTimer, SIGNAL(running()), this, SLOT(lock()));
 
     trackCallState();
     trackDisplayState();
@@ -82,11 +58,10 @@ DeviceLock::DeviceLock(QObject * parent) :
 // Call State
 void DeviceLock::handleCallStateChanged(const QString &state)
 {
-    qDebug() << state;
-
     bool active = (state == "active" || state == "ringing");
 
     if (m_activeCall != active) {
+        qDebug() << state;
         m_activeCall = active;
         setStateAndSetupLockTimer();
     }
@@ -118,11 +93,10 @@ void DeviceLock::trackCallState()
 
 void DeviceLock::handleDisplayStateChanged(const QString &state)
 {
-    qDebug() << state;
-
     bool displayOn = (state == "on" || state == "dimmed");
 
     if (m_displayOn != displayOn) {
+        qDebug() << state;
         m_displayOn = displayOn;
         setStateAndSetupLockTimer();
     }
@@ -154,11 +128,10 @@ void DeviceLock::trackDisplayState()
 
 void DeviceLock::handleInactivityStateChanged(const bool state)
 {
-    qDebug() << state;
-
     bool activity = !state;
 
     if (m_activity != activity) {
+        qDebug() << state;
         m_activity = activity;
         setStateAndSetupLockTimer();
     }
@@ -190,10 +163,9 @@ void DeviceLock::trackInactivityState(void)
 
 void DeviceLock::handleBlankingInhibitChanged(const QString &state)
 {
-    qDebug() << state;
-
     bool blankingInhibit = (state == "active");
     if (m_blankingInhibit != blankingInhibit ) {
+        qDebug() << state;
         m_blankingInhibit = blankingInhibit;
         emit blankingInhibitChanged();
     }
@@ -224,10 +196,9 @@ void DeviceLock::trackBlankingInhibit()
 
 void DeviceLock::handleBlankingPauseChanged(const QString &state)
 {
-    qDebug() << state;
-
     bool blankingPause = (state == "active");
     if (m_blankingPause != blankingPause ) {
+        qDebug() << state;
         m_blankingPause = blankingPause;
         emit blankingPauseChanged();
     }
@@ -255,6 +226,8 @@ void DeviceLock::trackBlankingPause()
     connect(pauseWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingPauseReply(QDBusPendingCallWatcher*)));
 }
 
+/** Evaluate initial devicelock state
+ */
 void DeviceLock::init()
 {
     if (QFile(settingsFile).exists() && watcher.addPath(settingsFile)) {
@@ -268,87 +241,92 @@ void DeviceLock::init()
 void DeviceLock::setupLockTimer()
 {
     // FIXME: unit test code wants to have both setupLockTimer() and
-    //        setStateAndSetupLockTimer() defined and I do not want
-    //        to meddle with the unit test logic
+    //        setStateAndSetupLockTimer() defined and I do not have
+    //        a clue how the unit test logic works ...
     setStateAndSetupLockTimer();
+}
+
+/** Evaluate devicelock state we should be in
+ */
+DeviceLock::LockState DeviceLock::getImplicitLockState()
+{
+    /* Assume current state is ok */
+    LockState requiredState = deviceLockState;
+
+    if (deviceLockState == Undefined) {
+        /* Initial state is decided by init() */
+    }
+    else if (lockingDelay < 0) {
+        /* Device locking is disabled */
+        requiredState = Unlocked;
+    }
+    else if (lockingDelay == 0 && !m_displayOn) {
+        /* Display is off in immediate lock mode */
+        requiredState = Locked;
+    }
+
+    return requiredState;
+}
+
+/** Check if devicelock timer should be running
+ */
+bool DeviceLock::lockingAllowed()
+{
+    /* Must be currently unlocked */
+    if (deviceLockState != Unlocked)
+        return false;
+
+    /* Must not be disabled */
+    if (lockingDelay < 0)
+        return false;
+
+    /* Must not be in active use */
+    if (m_activity && m_displayOn)
+        return false;
+
+    /* Must not have active call */
+    if (m_activeCall)
+        return false;
+
+    return true;
 }
 
 void DeviceLock::setStateAndSetupLockTimer()
 {
-    LockState requireState = deviceLockState;
+    LockState requiredState = getImplicitLockState();
 
-    bool disabled = (lockingDelay < 0);
-    bool immediate = (lockingDelay == 0);
-    bool triggered = false;
-
-    if (monoTime.tv_sec) {
-        /* Timer was started, check if it should have already triggered */
-        struct timeval compareTime;
-        tv_get_monotime(&compareTime);
-        if (lockingDelay*60 < tv_diff_in_s(&compareTime, &monoTime))
-            triggered = true;
-
-    }
-
-    /* Check in what deviceLockState we ought to be in
-     */
-    if (deviceLockState == Undefined) {
-        // Device lock state is not yet set
-        // -> need to wait for init() to finish
-    }
-    else if (disabled) {
-        // Device locking is disabled
-        requireState = Unlocked;
-    }
-    else if (triggered) {
-        // Timer should have already triggered
-        requireState = Locked;
-    }
-    else if (immediate && !m_displayOn) {
-        // Display is off in immediate lock mode
-        requireState = Locked;
-    }
-
-    if (deviceLockState != requireState) {
-        /* We should be in different deviceLockState. Set the
-         * state and assume that setState() recurses back here
-         * and we get to deal with the stable state
+    if (deviceLockState != requiredState) {
+        /* We should be in different deviceLockState. Set the state
+         * and assume that setState() recurses back here so that we
+         * get another chance to deal with the stable state.
          */
-        setState(requireState);
+        setState(requiredState);
     }
-    else {
-        /* Start/stop device lock timer as needed
+    else if (lockingAllowed()) {
+        /* Start devicelock timer
          */
-
-        bool locked = (deviceLockState == Locked);
-        bool active = (m_activity && m_displayOn);
-
-        if (disabled || locked || active || m_activeCall) {
-            if( monoTime.tv_sec ) {
-                qDebug() << "stop device lock timer";
-                lockTimer->stop();
-                monoTime.tv_sec = 0;
-            }
+        if (!m_hbTimer->isWaiting()) {
+            int delay_s = lockingDelay * 60;
+            qDebug("start devicelock timer (%d s)", delay_s);
+            m_hbTimer->wait(delay_s, delay_s + 12);
         }
         else {
-            if( !monoTime.tv_sec ) {
-                qDebug() << "start device lock timer";
-                lockTimer->start(lockingDelay * 60 * 1000);
-                tv_get_monotime(&monoTime);
-            }
-            else {
-                qDebug() << "device lock timer already running";
-                // FIXME: we should really reprogram the qtimer
-                //        since it will trigger too late if we
-                //        have been in suspend - or even better:
-                //        use keepalive timer to begin with
-            }
+            qDebug("devicelock timer already running");
+        }
+    }
+    else {
+        /* Stop devicelock timer
+         */
+        if (!m_hbTimer->isStopped()) {
+            qDebug("stop devicelock timer");
+            m_hbTimer->stop();
         }
     }
 }
 
 void DeviceLock::lock()
 {
+    qDebug() << "devicelock triggered";
     setState(Locked);
 }
 
@@ -438,7 +416,7 @@ bool DeviceLock::runPlugin(const QStringList &args)
 void DeviceLock::readSettings()
 {
     QSettings settings(settingsFile, QSettings::IniFormat);
-    if( isSet() )
+    if (isSet())
         lockingDelay = settings.value(lockingKey, "-1").toInt();
     else
         lockingDelay = -1;

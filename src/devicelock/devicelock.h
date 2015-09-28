@@ -23,6 +23,7 @@
 #include <QFileSystemWatcher>
 #include <QDBusContext>
 #include <QDBusPendingCallWatcher>
+#include <keepalive/backgroundactivity.h>
 
 class MGConfItem;
 class QTimer;
@@ -91,20 +92,22 @@ private:
     void trackBlankingPause();
     void trackBlankingInhibit();
 
+    LockState getImplicitLockState();
+    bool lockingAllowed();
+
     static bool runPlugin(const QStringList &args);
     void setupTimer();
     bool isPrivileged();
 
+     BackgroundActivity *m_hbTimer;
     int lockingDelay;
     QFileSystemWatcher watcher;
-    QTimer *lockTimer;
     LockState deviceLockState;
     bool m_activity;
     bool m_displayOn;
     bool m_activeCall;
     bool m_blankingPause;
     bool m_blankingInhibit;
-    struct timeval monoTime;
 
 #ifdef UNIT_TEST
     friend class Ut_DeviceLock;
