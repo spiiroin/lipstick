@@ -91,20 +91,19 @@ private:
     void trackBlankingPause();
     void trackBlankingInhibit();
 
-    LockState getImplicitLockState();
-    bool lockingAllowed();
-
     static bool runPlugin(const QStringList &args);
     void setupTimer();
     bool isPrivileged();
+    LockState getRequiredLockState();
+    bool lockingAllowed();
 
-     BackgroundActivity *m_hbTimer;
     int lockingDelay;
     QFileSystemWatcher watcher;
     LockState deviceLockState;
-    bool m_activity;
+    BackgroundActivity *m_hbTimer;
+    bool m_userActivity;
     bool m_displayOn;
-    bool m_activeCall;
+    bool m_callActive;
     bool m_blankingPause;
     bool m_blankingInhibit;
 

@@ -42,9 +42,9 @@ DeviceLock::DeviceLock(QObject * parent) :
     QDBusContext(),
     lockingDelay(-1),
     deviceLockState(Undefined),
-    m_activity(true),
+    m_userActivity(true),
     m_displayOn(true),
-    m_activeCall(false),
+    m_callActive(false),
     m_blankingPause(false),
     m_blankingInhibit(false)
 {
@@ -68,9 +68,9 @@ void DeviceLock::handleCallStateChanged(const QString &state)
     bool active = (state == MCE_CALL_STATE_ACTIVE ||
                    state == MCE_CALL_STATE_RINGING);
 
-    if (m_activeCall != active) {
+    if (m_callActive != active) {
         qDebug() << state;
-        m_activeCall = active;
+        m_callActive = active;
         setStateAndSetupLockTimer();
     }
 }
@@ -139,9 +139,9 @@ void DeviceLock::handleInactivityStateChanged(const bool state)
 {
     bool activity = !state;
 
-    if (m_activity != activity) {
+    if (m_userActivity != activity) {
         qDebug() << state;
-        m_activity = activity;
+        m_userActivity = activity;
         setStateAndSetupLockTimer();
     }
 }
@@ -251,7 +251,7 @@ void DeviceLock::init()
 
 /** Evaluate devicelock state we should be in
  */
-DeviceLock::LockState DeviceLock::getImplicitLockState()
+DeviceLock::LockState DeviceLock::getRequiredLockState()
 {
     /* Assume current state is ok */
     LockState requiredState = deviceLockState;
@@ -284,11 +284,11 @@ bool DeviceLock::lockingAllowed()
         return false;
 
     /* Must not be in active use */
-    if (m_activity && m_displayOn)
+    if (m_userActivity && m_displayOn)
         return false;
 
     /* Must not have active call */
-    if (m_activeCall)
+    if (m_callActive)
         return false;
 
     return true;
@@ -298,7 +298,7 @@ bool DeviceLock::lockingAllowed()
  */
 void DeviceLock::setStateAndSetupLockTimer()
 {
-    LockState requiredState = getImplicitLockState();
+    LockState requiredState = getRequiredLockState();
 
     if (deviceLockState != requiredState) {
         /* We should be in different deviceLockState. Set the state
