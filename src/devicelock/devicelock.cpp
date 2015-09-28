@@ -36,7 +36,7 @@ const char * const lockingKey = "/desktop/nemo/devicelock/automatic_locking";
  * ------------------------------------------------------------------------- */
 static void tv_get_monotime(struct timeval *tv)
 {
-#if defined(CLOCK_BOOTTIME) 
+#if defined(CLOCK_BOOTTIME)
   struct timespec ts;
   if (clock_gettime(CLOCK_BOOTTIME, &ts) < 0)
       if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
@@ -57,104 +57,141 @@ DeviceLock::DeviceLock(QObject * parent) :
     QDBusContext(),
     lockingDelay(-1),
     lockTimer(new QTimer(this)),
-    qmActivity(new MeeGo::QmActivity(this)),
-    qmLocks(new MeeGo::QmLocks(this)),
-    qmDisplayState(new MeeGo::QmDisplayState(this)),
     deviceLockState(Undefined),
-    m_activity(MeeGo::QmActivity::Active),
-    m_displayState(MeeGo::QmDisplayState::Unknown),
-    isCallActive(false),
+    m_activity(true),
+    m_displayOn(true),
+    m_activeCall(false),
     m_blankingPause(false),
     m_blankingInhibit(false)
 {
     // flag timer as not-started
     monoTime.tv_sec = 0;
 
-    // deviceLockState stays Undefined until init() gets called
+    // Note: deviceLockState stays Undefined until init() gets called
     connect(static_cast<HomeApplication *>(qApp), &HomeApplication::homeReady, this, &DeviceLock::init);
 
-    // locking happens via QTimer that can trigger too late
     connect(lockTimer, SIGNAL(timeout()), this, SLOT(lock()));
 
-    // track inactivity state
-    connect(qmActivity, SIGNAL(activityChanged(MeeGo::QmActivity::Activity)), this, SLOT(handleActivityChanged(MeeGo::QmActivity::Activity)));
-    // FIXME: sync D-Bus query
-    handleActivityChanged(qmActivity->get());
-
-    // track tklock state
-    connect(qmLocks, SIGNAL(stateChanged(MeeGo::QmLocks::Lock,MeeGo::QmLocks::State)), this, SLOT(setStateAndSetupLockTimer()));
-    // FIXME: this is most likely useless (but might inadvertly fix the missing display state init?)
-
-    // track display state
-    connect(qmDisplayState, SIGNAL(displayStateChanged(MeeGo::QmDisplayState::DisplayState)), this, SLOT(handleDisplayStateChanged(MeeGo::QmDisplayState::DisplayState)));
-    // FIXME: sync D-Bus query
-    handleDisplayStateChanged(qmDisplayState->get());
-
-    // track call state
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "sig_call_state_ind", this, SLOT(handleCallStateChange(QString, QString)));
-    // FIXME: missing query for: initial call state -> problems on lipstick crash & restart
-
-    // track blanking inhibit state
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_inhibit_ind", this, SLOT(handleBlankingInhibitChange(QString)));
-    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_inhibit");
-    QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
-    QDBusPendingCallWatcher *inhibitWatcher = new QDBusPendingCallWatcher(reply, this);
-    connect(inhibitWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(sendInhibitFinished(QDBusPendingCallWatcher*)));
-
-    // track blanking pause state
-    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_pause_ind", this, SLOT(handleBlankingPauseChange(QString)));
-    QDBusMessage pauseCall = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_pause");
-    QDBusPendingCall pauseReply = QDBusConnection::systemBus().asyncCall(pauseCall);
-    QDBusPendingCallWatcher *pauseWatcher = new QDBusPendingCallWatcher(pauseReply, this);
-    connect(pauseWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(sendPauseFinished(QDBusPendingCallWatcher*)));
-
+    trackCallState();
+    trackDisplayState();
+    trackInactivityState();
+    trackBlankingPause();
+    trackBlankingInhibit();
 }
 
-void DeviceLock::sendInhibitFinished(QDBusPendingCallWatcher *call)
+// Call State
+void DeviceLock::handleCallStateChanged(const QString &state)
 {
-    QDBusPendingReply<QString> reply = *call;
-    if (reply.isError()) {
-        qCritical() << "Call to mce failed:" << reply.error();
-    } else {
-        handleBlankingInhibitChange(reply.value());
-    }
-    call->deleteLater();
-}
-
-void DeviceLock::sendPauseFinished(QDBusPendingCallWatcher *call)
-{
-    QDBusPendingReply<QString> reply = *call;
-    if (reply.isError()) {
-        qCritical() << "Call to mce failed:" << reply.error();
-    } else {
-        handleBlankingPauseChange(reply.value());
-    }
-    call->deleteLater();
-}
-
-
-void DeviceLock::handleCallStateChange(const QString &state, const QString &ignored)
-{
-    Q_UNUSED(ignored);
+    qDebug() << state;
 
     bool active = (state == "active" || state == "ringing");
 
-    if (isCallActive != active) {
-        isCallActive = active;
+    if (m_activeCall != active) {
+        m_activeCall = active;
         setStateAndSetupLockTimer();
     }
 }
 
-void DeviceLock::handleBlankingPauseChange(const QString &state)
+void DeviceLock::handleCallStateReply(QDBusPendingCallWatcher *call)
 {
-    bool blankingPause = (state == "active");
-    if (m_blankingPause != blankingPause ) {
-        m_blankingPause = blankingPause;
-        emit blankingPauseChanged();
+    QDBusPendingReply<QString> reply = *call;
+    if (reply.isError()) {
+        qCritical() << "Call to mce failed:" << reply.error();
+    } else {
+        handleCallStateChanged(reply.value());
+    }
+    call->deleteLater();
+}
+
+void DeviceLock::trackCallState()
+{
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "sig_call_state_ind",
+                                         this, SLOT(handleCallStateChanged(QString)));
+
+    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_call_state");
+    QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
+    QDBusPendingCallWatcher *watch = new QDBusPendingCallWatcher(reply, this);
+    connect(watch, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleCallStateReply(QDBusPendingCallWatcher*)));
+}
+
+// Display State
+
+void DeviceLock::handleDisplayStateChanged(const QString &state)
+{
+    qDebug() << state;
+
+    bool displayOn = (state == "on" || state == "dimmed");
+
+    if (m_displayOn != displayOn) {
+        m_displayOn = displayOn;
+        setStateAndSetupLockTimer();
     }
 }
-void DeviceLock::handleBlankingInhibitChange(const QString &state)
+
+void DeviceLock::handleDisplayStateReply(QDBusPendingCallWatcher *call)
 {
+    QDBusPendingReply<QString> reply = *call;
+    if (reply.isError()) {
+        qCritical() << "Call to mce failed:" << reply.error();
+    } else {
+        handleDisplayStateChanged(reply.value());
+    }
+    call->deleteLater();
+}
+
+void DeviceLock::trackDisplayState()
+{
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_status_ind",
+                                         this, SLOT(handleDisplayStateChanged(QString)));
+
+    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_status");
+    QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
+    QDBusPendingCallWatcher *watch = new QDBusPendingCallWatcher(reply, this);
+    connect(watch, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleDisplayStateReply(QDBusPendingCallWatcher*)));
+}
+
+// Inactivity State
+
+void DeviceLock::handleInactivityStateChanged(const bool state)
+{
+    qDebug() << state;
+
+    bool activity = !state;
+
+    if (m_activity != activity) {
+        m_activity = activity;
+        setStateAndSetupLockTimer();
+    }
+}
+
+void DeviceLock::handleInactivityStateReply(QDBusPendingCallWatcher *call)
+{
+    QDBusPendingReply<bool> reply = *call;
+    if (reply.isError()) {
+        qCritical() << "Call to mce failed:" << reply.error();
+    } else {
+        handleInactivityStateChanged(reply.value());
+    }
+    call->deleteLater();
+}
+
+void DeviceLock::trackInactivityState(void)
+{
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "system_inactivity_ind",
+                                         this, SLOT(handleInactivityStateChanged(bool)));
+
+    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_inactivity_status");
+    QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
+    QDBusPendingCallWatcher *watch = new QDBusPendingCallWatcher(reply, this);
+    connect(watch, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleInactivityStateReply(QDBusPendingCallWatcher*)));
+}
+
+// Blanking Inhibit
+
+void DeviceLock::handleBlankingInhibitChanged(const QString &state)
+{
+    qDebug() << state;
+
     bool blankingInhibit = (state == "active");
     if (m_blankingInhibit != blankingInhibit ) {
         m_blankingInhibit = blankingInhibit;
@@ -162,12 +199,60 @@ void DeviceLock::handleBlankingInhibitChange(const QString &state)
     }
 }
 
-void DeviceLock::handleActivityChanged(MeeGo::QmActivity::Activity activity)
+void DeviceLock::handleBlankingInhibitReply(QDBusPendingCallWatcher *call)
 {
-    if (m_activity != activity) {
-        m_activity = activity;
-        setStateAndSetupLockTimer();
+    QDBusPendingReply<QString> reply = *call;
+    if (reply.isError()) {
+        qCritical() << "Call to mce failed:" << reply.error();
+    } else {
+        handleBlankingInhibitChanged(reply.value());
     }
+    call->deleteLater();
+}
+
+void DeviceLock::trackBlankingInhibit()
+{
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_inhibit_ind", this, SLOT(handleBlankingInhibitChanged(QString)));
+
+    QDBusMessage call = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_inhibit");
+    QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
+    QDBusPendingCallWatcher *inhibitWatcher = new QDBusPendingCallWatcher(reply, this);
+    connect(inhibitWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingInhibitReply(QDBusPendingCallWatcher*)));
+}
+
+// Blanking Pause
+
+void DeviceLock::handleBlankingPauseChanged(const QString &state)
+{
+    qDebug() << state;
+
+    bool blankingPause = (state == "active");
+    if (m_blankingPause != blankingPause ) {
+        m_blankingPause = blankingPause;
+        emit blankingPauseChanged();
+    }
+}
+
+void DeviceLock::handleBlankingPauseReply(QDBusPendingCallWatcher *call)
+{
+    QDBusPendingReply<QString> reply = *call;
+    if (reply.isError()) {
+        qCritical() << "Call to mce failed:" << reply.error();
+    } else {
+        handleBlankingPauseChanged(reply.value());
+    }
+    call->deleteLater();
+}
+
+void DeviceLock::trackBlankingPause()
+{
+    // track blanking pause state
+    QDBusConnection::systemBus().connect(QString(), "/com/nokia/mce/signal", "com.nokia.mce.signal", "display_blanking_pause_ind", this, SLOT(handleBlankingPauseChanged(QString)));
+
+    QDBusMessage pauseCall = QDBusMessage::createMethodCall("com.nokia.mce", "/", "com.nokia.mce.request", "get_display_blanking_pause");
+    QDBusPendingCall pauseReply = QDBusConnection::systemBus().asyncCall(pauseCall);
+    QDBusPendingCallWatcher *pauseWatcher = new QDBusPendingCallWatcher(pauseReply, this);
+    connect(pauseWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingPauseReply(QDBusPendingCallWatcher*)));
 }
 
 void DeviceLock::init()
@@ -194,7 +279,6 @@ void DeviceLock::setStateAndSetupLockTimer()
 
     bool disabled = (lockingDelay < 0);
     bool immediate = (lockingDelay == 0);
-    bool displayOn = (m_displayState != MeeGo::QmDisplayState::DisplayState::Off);
     bool triggered = false;
 
     if (monoTime.tv_sec) {
@@ -220,7 +304,7 @@ void DeviceLock::setStateAndSetupLockTimer()
         // Timer should have already triggered
         requireState = Locked;
     }
-    else if (immediate && !displayOn) {
+    else if (immediate && !m_displayOn) {
         // Display is off in immediate lock mode
         requireState = Locked;
     }
@@ -236,10 +320,10 @@ void DeviceLock::setStateAndSetupLockTimer()
         /* Start/stop device lock timer as needed
          */
 
-        bool activity = (m_activity == MeeGo::QmActivity::Active);
         bool locked = (deviceLockState == Locked);
+        bool active = (m_activity && m_displayOn);
 
-        if( disabled || locked || isCallActive || (activity && displayOn)) {
+        if (disabled || locked || active || m_activeCall) {
             if( monoTime.tv_sec ) {
                 qDebug() << "stop device lock timer";
                 lockTimer->stop();
@@ -254,16 +338,12 @@ void DeviceLock::setStateAndSetupLockTimer()
             }
             else {
                 qDebug() << "device lock timer already running";
+                // FIXME: we should really reprogram the qtimer
+                //        since it will trigger too late if we
+                //        have been in suspend - or even better:
+                //        use keepalive timer to begin with
             }
         }
-    }
-}
-
-void DeviceLock::handleDisplayStateChanged(MeeGo::QmDisplayState::DisplayState state)
-{
-    if (m_displayState != state) {
-        m_displayState = state;
-        setStateAndSetupLockTimer();
     }
 }
 
@@ -287,10 +367,24 @@ bool DeviceLock::blankingInhibit() const
     return m_blankingInhibit;
 }
 
+static const char *reprLockState(int state)
+{
+    switch (state) {
+    case DeviceLock::Unlocked:  return "Unlocked";
+    case DeviceLock::Locked:    return "Locked";
+    case DeviceLock::Undefined: return "Undefined";
+    default: break;
+    }
+    return "Invalid";
+}
+
 void DeviceLock::setState(int state)
 {
     if (deviceLockState != (LockState)state) {
         if (state == Locked || isPrivileged()) {
+            qDebug() << reprLockState(deviceLockState) <<
+                " -> " << reprLockState(state);
+
             deviceLockState = (LockState)state;
             emit stateChanged(state);
             emit _notifyStateChanged();

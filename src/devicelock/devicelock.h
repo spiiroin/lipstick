@@ -66,16 +66,31 @@ private slots:
     void setupLockTimer();
     void setStateAndSetupLockTimer();
     void lock();
-    void handleDisplayStateChanged(MeeGo::QmDisplayState::DisplayState state);
-    void handleCallStateChange(const QString &state, const QString &ignored);
-    void handleBlankingPauseChange(const QString &state);
-    void handleBlankingInhibitChange(const QString &state);
-    void handleActivityChanged(MeeGo::QmActivity::Activity activity);
+
+    void handleCallStateChanged(const QString &state);
+    void handleCallStateReply(QDBusPendingCallWatcher *call);
+
+    void handleDisplayStateChanged(const QString &state);
+    void handleDisplayStateReply(QDBusPendingCallWatcher *call);
+
+    void handleInactivityStateChanged(const bool state);
+    void handleInactivityStateReply(QDBusPendingCallWatcher *call);
+
+    void handleBlankingPauseChanged(const QString &state);
+    void handleBlankingPauseReply(QDBusPendingCallWatcher *call);
+
+    void handleBlankingInhibitChanged(const QString &state);
+    void handleBlankingInhibitReply(QDBusPendingCallWatcher *call);
+
     void readSettings();
-    void sendInhibitFinished(QDBusPendingCallWatcher *call);
-    void sendPauseFinished(QDBusPendingCallWatcher *call);
 
 private:
+    void trackCallState();
+    void trackDisplayState();
+    void trackInactivityState(void);
+    void trackBlankingPause();
+    void trackBlankingInhibit();
+
     static bool runPlugin(const QStringList &args);
     void setupTimer();
     bool isPrivileged();
@@ -83,13 +98,10 @@ private:
     int lockingDelay;
     QFileSystemWatcher watcher;
     QTimer *lockTimer;
-    MeeGo::QmActivity *qmActivity;
-    MeeGo::QmLocks *qmLocks;
-    MeeGo::QmDisplayState *qmDisplayState;
     LockState deviceLockState;
-    MeeGo::QmActivity::Activity m_activity;
-    MeeGo::QmDisplayState::DisplayState m_displayState;
-    bool isCallActive;
+    bool m_activity;
+    bool m_displayOn;
+    bool m_activeCall;
     bool m_blankingPause;
     bool m_blankingInhibit;
     struct timeval monoTime;
