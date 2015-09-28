@@ -95,7 +95,7 @@ private:
     void setupTimer();
     bool isPrivileged();
     LockState getRequiredLockState();
-    bool lockingAllowed();
+    bool lockingIsAllowed();
 
     int m_lockingDelay;
     QFileSystemWatcher m_settingsWatcher;

@@ -272,7 +272,7 @@ DeviceLock::LockState DeviceLock::getRequiredLockState()
 
 /** Check if devicelock timer should be running
  */
-bool DeviceLock::lockingAllowed()
+bool DeviceLock::lockingIsAllowed()
 {
     /* Must be currently unlocked */
     if (m_deviceLockState != Unlocked)
@@ -306,7 +306,7 @@ void DeviceLock::setStateAndSetupLockTimer()
          */
         setState(requiredState);
     }
-    else if (lockingAllowed()) {
+    else if (lockingIsAllowed()) {
         /* Start devicelock timer
          */
         if (!m_hbTimer->isWaiting()) {
@@ -329,7 +329,7 @@ void DeviceLock::setStateAndSetupLockTimer()
     }
 }
 
-/** Slot for locking device
+/** Slot for locking device on timer trigger
  */
 void DeviceLock::lock()
 {
