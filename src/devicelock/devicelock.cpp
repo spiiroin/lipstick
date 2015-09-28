@@ -227,14 +227,13 @@ void DeviceLock::handleBlankingPauseReply(QDBusPendingCallWatcher *call)
 
 void DeviceLock::trackBlankingPause()
 {
-    // track blanking pause state
     QDBusConnection::systemBus().connect(QString(), MCE_SIGNAL_PATH, MCE_SIGNAL_IF, MCE_PREVENT_BLANK_SIG,
                                          this, SLOT(handleBlankingPauseChanged(QString)));
 
-    QDBusMessage pauseCall = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_PREVENT_BLANK_GET);
-    QDBusPendingCall pauseReply = QDBusConnection::systemBus().asyncCall(pauseCall);
-    QDBusPendingCallWatcher *pauseWatcher = new QDBusPendingCallWatcher(pauseReply, this);
-    connect(pauseWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingPauseReply(QDBusPendingCallWatcher*)));
+    QDBusMessage call = QDBusMessage::createMethodCall(MCE_SERVICE, MCE_REQUEST_PATH, MCE_REQUEST_IF, MCE_PREVENT_BLANK_GET);
+    QDBusPendingCall reply = QDBusConnection::systemBus().asyncCall(call);
+    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(reply, this);
+    connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)), SLOT(handleBlankingPauseReply(QDBusPendingCallWatcher*)));
 }
 
 /** Evaluate initial devicelock state
